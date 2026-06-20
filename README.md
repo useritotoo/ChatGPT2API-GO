@@ -362,6 +362,8 @@ config.json
   "refresh_account_interval_minute": 60,
   "image_retention_days": 15,
   "image_poll_timeout_secs": 120,
+  "image_poll_interval_secs": 4,
+  "image_poll_initial_wait_secs": 0,
   "image_account_concurrency": 3,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": false,
@@ -370,6 +372,12 @@ config.json
   "global_system_prompt": ""
 }
 ```
+
+图片相关超时说明：
+
+- `image_poll_timeout_secs`：图片 SSE 等待和最终图片记录轮询的总超时，设置为 `600` 即最多等待 10 分钟。
+- `image_poll_interval_secs`：查询最终图片记录的间隔。
+- `image_poll_initial_wait_secs`：SSE 结束后首次查询前的等待时间，网络慢或容易 429 时可设为 `5` 到 `10`。
 
 ### 环境变量
 

@@ -53,6 +53,22 @@ func isTurnstileRequirementErrorText(err error) bool {
 	return strings.Contains(text, "turnstile") && strings.Contains(text, "required")
 }
 
+func isTemporaryUpstreamErrorText(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	if strings.Contains(text, "timed out") || strings.Contains(text, "timeout") || strings.Contains(text, "deadline exceeded") {
+		return true
+	}
+	for _, marker := range []string{"status=500", "status=502", "status=503", "status=504", "http 500", "http 502", "http 503", "http 504"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func rateLimitRestoreDelay(err error) time.Duration {
 	if err == nil {
 		return 5 * time.Minute

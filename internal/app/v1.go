@@ -58,34 +58,37 @@ func (s *Server) imageResult(w http.ResponseWriter, r *http.Request, id *Identit
 		return
 	}
 	refs := inputs
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.imageRequestTimeout())
 	defer cancel()
 	data := []map[string]any{}
-	for i := 0; i < n; i++ {
-		items, err := s.generateImageWithPool(ctx, prompt, model, size, resolution, refs)
+	items, err := s.generateImagesWithPool(ctx, prompt, model, size, resolution, refs, n)
+	if err != nil {
+		s.refundImage(id, n)
+		s.logCallFailure(callID, endpoint, model, action, err, map[string]any{"n": n})
+		writeErr(w, 502, err.Error())
+		return
+	}
+	for _, result := range items {
+		rel, url, err := s.saveImage(r, result.Bytes)
 		if err != nil {
 			s.refundImage(id, n-len(data))
-			s.logCallFailure(callID, endpoint, model, action, err, map[string]any{"n": n})
-			writeErr(w, 502, err.Error())
+			s.logCallFailure(callID, endpoint, model, action, err, nil)
+			writeErr(w, 500, err.Error())
 			return
 		}
-		for _, result := range items {
-			rel, url, err := s.saveImage(r, result.Bytes)
-			if err != nil {
-				s.refundImage(id, n-len(data))
-				s.logCallFailure(callID, endpoint, model, action, err, nil)
-				writeErr(w, 500, err.Error())
-				return
-			}
-			s.recordOwner(id, rel)
-			s.recordPrompt(rel, prompt, isEdit)
-			item := map[string]any{"url": url, "revised_prompt": firstNonEmpty(result.RevisedPrompt, prompt)}
-			if responseFormat == "b64_json" || responseFormat == "" {
-				item["b64_json"] = base64.StdEncoding.EncodeToString(result.Bytes)
-			}
-			data = append(data, item)
+		s.recordOwner(id, rel)
+		s.recordPrompt(rel, prompt, isEdit)
+		item := map[string]any{"url": url, "revised_prompt": firstNonEmpty(result.RevisedPrompt, prompt)}
+		if responseFormat == "b64_json" || responseFormat == "" {
+			item["b64_json"] = base64.StdEncoding.EncodeToString(result.Bytes)
+		}
+		data = append(data, item)
+		if len(data) >= n {
 			break
 		}
+	}
+	if len(data) < n {
+		s.refundImage(id, n-len(data))
 	}
 	s.logCallSuccess(callID, endpoint, model, action, map[string]any{"n": n, "image_count": len(data)})
 	writeJSON(w, 200, map[string]any{"created": time.Now().Unix(), "data": data})
@@ -301,29 +304,32 @@ func (s *Server) handleV1ChatImageCompletion(w http.ResponseWriter, r *http.Requ
 	}
 	size := strAny(b["size"], "")
 	resolution := strAny(b["resolution"], "")
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.imageRequestTimeout())
 	defer cancel()
 	refs := extractChatImages(b)
 	data := []map[string]any{}
-	for i := 0; i < n; i++ {
-		items, err := s.generateImageWithPool(ctx, prompt, model, size, resolution, refs)
+	items, err := s.generateImagesWithPool(ctx, prompt, model, size, resolution, refs, n)
+	if err != nil {
+		s.refundImage(id, n)
+		writeErr(w, 502, err.Error())
+		return
+	}
+	for _, result := range items {
+		rel, url, err := s.saveImage(r, result.Bytes)
 		if err != nil {
 			s.refundImage(id, n-len(data))
-			writeErr(w, 502, err.Error())
+			writeErr(w, 500, err.Error())
 			return
 		}
-		for _, result := range items {
-			rel, url, err := s.saveImage(r, result.Bytes)
-			if err != nil {
-				s.refundImage(id, n-len(data))
-				writeErr(w, 500, err.Error())
-				return
-			}
-			s.recordOwner(id, rel)
-			s.recordPrompt(rel, prompt, len(refs) > 0)
-			data = append(data, map[string]any{"url": url, "b64_json": base64.StdEncoding.EncodeToString(result.Bytes), "revised_prompt": firstNonEmpty(result.RevisedPrompt, prompt)})
+		s.recordOwner(id, rel)
+		s.recordPrompt(rel, prompt, len(refs) > 0)
+		data = append(data, map[string]any{"url": url, "b64_json": base64.StdEncoding.EncodeToString(result.Bytes), "revised_prompt": firstNonEmpty(result.RevisedPrompt, prompt)})
+		if len(data) >= n {
 			break
 		}
+	}
+	if len(data) < n {
+		s.refundImage(id, n-len(data))
 	}
 	content := buildChatImageMarkdown(data)
 	if boolAny(b["stream"], false) {
@@ -484,7 +490,7 @@ func (s *Server) handleV1ResponseImage(w http.ResponseWriter, r *http.Request, i
 	if len(refs) == 0 {
 		size = "1:1"
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.imageRequestTimeout())
 	defer cancel()
 	items, err := s.generateImageWithPool(ctx, prompt, model, size, "", refs)
 	if err != nil {
@@ -716,7 +722,7 @@ func (s *Server) imageResultStream(w http.ResponseWriter, r *http.Request, id *I
 		writeErr(w, 402, "画图额度不足")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.imageRequestTimeout())
 	defer cancel()
 	refs := inputs
 	w.Header().Set("Content-Type", "text/event-stream")

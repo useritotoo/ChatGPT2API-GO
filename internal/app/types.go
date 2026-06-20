@@ -7,6 +7,8 @@ type Config struct {
 	RefreshAccountIntervalMinute  int            `json:"refresh_account_interval_minute"`
 	ImageRetentionDays            int            `json:"image_retention_days"`
 	ImagePollTimeoutSecs          int            `json:"image_poll_timeout_secs"`
+	ImagePollIntervalSecs         int            `json:"image_poll_interval_secs"`
+	ImagePollInitialWaitSecs      int            `json:"image_poll_initial_wait_secs"`
 	AutoRemoveRateLimitedAccounts bool           `json:"auto_remove_rate_limited_accounts"`
 	AutoRemoveInvalidAccounts     bool           `json:"auto_remove_invalid_accounts"`
 	LogLevels                     []string       `json:"log_levels"`

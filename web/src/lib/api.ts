@@ -82,6 +82,8 @@ export type SettingsConfig = {
   cleanup_protect_gallery?: boolean;
   cleanup_protect_user_images?: boolean;
   image_poll_timeout_secs?: number | string;
+  image_poll_interval_secs?: number | string;
+  image_poll_initial_wait_secs?: number | string;
   image_account_concurrency?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;

@@ -145,6 +145,8 @@ export function ImageSection() {
   const setCleanupProtectGallery = useSettingsStore((s) => s.setCleanupProtectGallery);
   const setCleanupProtectUserImages = useSettingsStore((s) => s.setCleanupProtectUserImages);
   const setImagePollTimeoutSecs = useSettingsStore((s) => s.setImagePollTimeoutSecs);
+  const setImagePollIntervalSecs = useSettingsStore((s) => s.setImagePollIntervalSecs);
+  const setImagePollInitialWaitSecs = useSettingsStore((s) => s.setImagePollInitialWaitSecs);
   const setImageAccountConcurrency = useSettingsStore((s) => s.setImageAccountConcurrency);
 
   return (
@@ -162,14 +164,34 @@ export function ImageSection() {
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-2">
-          <label className={LABEL_CLASS}>图片轮询超时（秒）</label>
+          <label className={LABEL_CLASS}>图片总等待超时（秒）</label>
           <Input
             value={String(config?.image_poll_timeout_secs || "")}
             onChange={(e) => setImagePollTimeoutSecs(e.target.value)}
             placeholder="120"
             className={INPUT_CLASS}
           />
-          <p className={HELP_CLASS}>等待上游图片结果的最长时间。</p>
+          <p className={HELP_CLASS}>控制图片 SSE 等待和最终图片记录轮询的最长时间；例如 600 表示最多等待 10 分钟。</p>
+        </div>
+        <div className="space-y-2">
+          <label className={LABEL_CLASS}>图片轮询间隔（秒）</label>
+          <Input
+            value={String(config?.image_poll_interval_secs || "")}
+            onChange={(e) => setImagePollIntervalSecs(e.target.value)}
+            placeholder="4"
+            className={INPUT_CLASS}
+          />
+          <p className={HELP_CLASS}>等待图片任务完成时查询上游记录的间隔，调大可减少无效请求。</p>
+        </div>
+        <div className="space-y-2">
+          <label className={LABEL_CLASS}>首次轮询等待（秒）</label>
+          <Input
+            value={String(config?.image_poll_initial_wait_secs || "")}
+            onChange={(e) => setImagePollInitialWaitSecs(e.target.value)}
+            placeholder="0"
+            className={INPUT_CLASS}
+          />
+          <p className={HELP_CLASS}>SSE 结束后首次查询前的等待时间；网络慢或容易 429 时可设为 5-10。</p>
         </div>
         <div className="space-y-2">
           <label className={LABEL_CLASS}>单账号图片并发</label>
@@ -179,7 +201,7 @@ export function ImageSection() {
             placeholder="3"
             className={INPUT_CLASS}
           />
-          <p className={HELP_CLASS}>限制每个账号同时处理的图片请求数量。</p>
+          <p className={HELP_CLASS}>限制每个账号同时处理的图片请求数量，多图请求会按此上限并行。</p>
         </div>
       </div>
 

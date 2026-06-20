@@ -45,6 +45,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if v, ok := body["image_poll_timeout_secs"]; ok {
 			s.cfg.ImagePollTimeoutSecs = intAny(v, s.cfg.ImagePollTimeoutSecs)
 		}
+		if v, ok := body["image_poll_interval_secs"]; ok {
+			s.cfg.ImagePollIntervalSecs = intAny(v, s.cfg.ImagePollIntervalSecs)
+		}
+		if v, ok := body["image_poll_initial_wait_secs"]; ok {
+			s.cfg.ImagePollInitialWaitSecs = intAny(v, s.cfg.ImagePollInitialWaitSecs)
+		}
 		if v, ok := body["auto_remove_invalid_accounts"]; ok {
 			s.cfg.AutoRemoveInvalidAccounts = boolAny(v, false)
 		}

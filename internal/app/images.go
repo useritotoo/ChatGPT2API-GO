@@ -16,7 +16,7 @@ import (
 )
 
 func (s *Server) saveImage(r *http.Request, data []byte) (string, string, error) {
-	s.cleanupOldImages()
+	s.maybeCleanupOldImages()
 	sum := md5.Sum(data)
 	relDir := filepath.Join(time.Now().Format("2006"), time.Now().Format("01"), time.Now().Format("02"))
 	name := fmt.Sprintf("%d_%x.png", time.Now().Unix(), sum)
@@ -44,6 +44,16 @@ func (s *Server) recordPrompt(rel, prompt string, isEdit bool) {
 		ps[rel] = map[string]any{"prompt": prompt, "is_edit": isEdit, "created_at": time.Now().Unix()}
 		return ps
 	})
+}
+func (s *Server) maybeCleanupOldImages() {
+	s.imageCleanupMu.Lock()
+	if time.Since(s.lastImageCleanup) < time.Hour {
+		s.imageCleanupMu.Unlock()
+		return
+	}
+	s.lastImageCleanup = time.Now()
+	s.imageCleanupMu.Unlock()
+	s.cleanupOldImages()
 }
 func (s *Server) cleanupOldImages() int {
 	days := s.cfg.ImageRetentionDays

@@ -194,7 +194,7 @@ func (s *Server) handleImageTaskGeneration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.saveTask(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), s.imageRequestTimeout())
 	s.setTaskCancel(t.ID, cancel)
 	go func(task ImageTask, identity *Identity) {
 		defer s.popTaskCancel(task.ID)
@@ -282,7 +282,7 @@ func (s *Server) handleImageTaskEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.saveTask(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), s.imageRequestTimeout())
 	s.setTaskCancel(t.ID, cancel)
 	go func(task ImageTask, identity *Identity) {
 		defer s.popTaskCancel(task.ID)
@@ -392,7 +392,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 402, "对话额度不足")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.imageRequestTimeout())
 	defer cancel()
 	requestedUpstreamCID := strings.TrimSpace(strAny(b["upstream_conversation_id"], strAny(b["conversation_id"], "")))
 	_ = requestedUpstreamCID
@@ -472,7 +472,8 @@ func (s *Server) resolveChatStreamImages(ctx context.Context, r *http.Request, i
 		return fallbackText, false
 	}
 	if len(fileIDs) == 0 && len(sedimentIDs) == 0 && conversationID != "" {
-		f, sed := client.pollImageIDs(ctx, conversationID, time.Duration(s.cfg.ImagePollTimeoutSecs)*time.Second)
+		opts := s.imageGenerationOptions()
+		f, sed := client.pollImageIDs(ctx, conversationID, opts.Timeout, opts.PollInterval, opts.PollInitialWait)
 		fileIDs = append(fileIDs, f...)
 		sedimentIDs = append(sedimentIDs, sed...)
 	}
@@ -521,7 +522,7 @@ func (s *Server) handleChatStreamImage(w http.ResponseWriter, r *http.Request, i
 		writeErr(w, 402, "画图额度不足")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.imageRequestTimeout())
 	defer cancel()
 	items, err := s.generateImageWithPool(ctx, prompt, model, strAny(b["size"], ""), strAny(b["resolution"], ""), extractChatImages(b))
 	w.Header().Set("Content-Type", "text/event-stream")

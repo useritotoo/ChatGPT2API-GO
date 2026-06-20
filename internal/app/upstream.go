@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/sha3"
 	"encoding/base64"
 	"encoding/json"
@@ -53,6 +54,29 @@ type chatRequirements struct{ Token, ProofToken, TurnstileToken, SOToken string 
 type upstreamImageResult struct {
 	Bytes         []byte
 	RevisedPrompt string
+}
+
+type imageGenerationOptions struct {
+	Timeout         time.Duration
+	PollInterval    time.Duration
+	PollInitialWait time.Duration
+	UploadTimeout   time.Duration
+}
+
+func normalizeImageGenerationOptions(opts imageGenerationOptions) imageGenerationOptions {
+	if opts.Timeout <= 0 {
+		opts.Timeout = 120 * time.Second
+	}
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = 4 * time.Second
+	}
+	if opts.PollInitialWait < 0 {
+		opts.PollInitialWait = 0
+	}
+	if opts.UploadTimeout <= 0 {
+		opts.UploadTimeout = opts.Timeout
+	}
+	return opts
 }
 
 type UpstreamTextEvent struct {
@@ -475,8 +499,9 @@ func (c *UpstreamClient) streamTextConversationEvents(ctx context.Context, messa
 	return out, errs
 }
 
-func (c *UpstreamClient) GenerateImage(ctx context.Context, prompt, model, size, resolution string, refs [][]byte) ([]upstreamImageResult, error) {
-	traceLogf(ctx, "├─ image generation start model=%s size=%s resolution=%s refs=%d", model, size, resolution, len(refs))
+func (c *UpstreamClient) GenerateImage(ctx context.Context, prompt, model, size, resolution string, refs [][]byte, opts imageGenerationOptions) ([]upstreamImageResult, error) {
+	opts = normalizeImageGenerationOptions(opts)
+	traceLogf(ctx, "├─ image generation start model=%s size=%s resolution=%s refs=%d timeout=%s poll_interval=%s initial_wait=%s", model, size, resolution, len(refs), opts.Timeout, opts.PollInterval, opts.PollInitialWait)
 	if c.token == "" {
 		return nil, errors.New("access token is required for image generation")
 	}
@@ -495,7 +520,7 @@ func (c *UpstreamClient) GenerateImage(ctx context.Context, prompt, model, size,
 	uploads := []map[string]any{}
 	for i, b := range refs {
 		traceLogf(ctx, "│  ├─ step upload reference image %d/%d bytes=%d", i+1, len(refs), len(b))
-		up, err := c.uploadImage(ctx, b, fmt.Sprintf("image_%d.png", i+1))
+		up, err := c.uploadImage(ctx, b, fmt.Sprintf("image_%d.png", i+1), opts.UploadTimeout)
 		if err != nil {
 			return nil, err
 		}
@@ -518,8 +543,8 @@ func (c *UpstreamClient) GenerateImage(ctx context.Context, prompt, model, size,
 	message := ""
 	state := newUpstreamConversationState("", nil)
 	generated := false
-	// 用 120s 超时读取 SSE，防止无限挂起
-	sseCtx, sseCancel := context.WithTimeout(ctx, 120*time.Second)
+	// 限制 SSE 读取时长，防止上游无限挂起。
+	sseCtx, sseCancel := context.WithTimeout(ctx, opts.Timeout)
 	defer sseCancel()
 	// 从 resp.Body 读取 SSE，受 sseCtx 控制
 	done := make(chan struct{}, 1)
@@ -546,15 +571,15 @@ func (c *UpstreamClient) GenerateImage(ctx context.Context, prompt, model, size,
 	case <-done:
 	case <-sseCtx.Done():
 		if !generated {
-			return nil, errors.New("image generation SSE timed out (120s)")
+			return nil, fmt.Errorf("image generation SSE timed out (%ds)", int(opts.Timeout/time.Second))
 		}
 	}
 	if message != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 && (state.Blocked || state.ToolInvoked == false || state.TurnUseCase == "text") {
 		return nil, errors.New(cleanImageMessage(message))
 	}
 	if cid != "" && !isImageQuotaMessage(message) {
-		traceLogf(ctx, "│  ├─ step poll final image tool records conversation=%s", maskedValue(cid))
-		f, s := c.pollImageIDs(ctx, cid, 120*time.Second)
+		traceLogf(ctx, "│  ├─ step poll final image tool records conversation=%s timeout=%s interval=%s", maskedValue(cid), opts.Timeout, opts.PollInterval)
+		f, s := c.pollImageIDs(ctx, cid, opts.Timeout, opts.PollInterval, opts.PollInitialWait)
 		fileIDs = append(fileIDs, f...)
 		sedimentIDs = append(sedimentIDs, s...)
 	}
@@ -570,12 +595,19 @@ func (c *UpstreamClient) GenerateImage(ctx context.Context, prompt, model, size,
 		return nil, errors.New("upstream returned no image")
 	}
 	results := []upstreamImageResult{}
+	seenBytes := map[string]bool{}
 	for i, u := range urls {
 		traceLogf(ctx, "│  ├─ step download generated image %d/%d", i+1, len(urls))
 		b, err := c.download(ctx, u)
 		if err != nil {
 			return nil, err
 		}
+		sum := fmt.Sprintf("%x", md5.Sum(b))
+		if seenBytes[sum] {
+			traceLogf(ctx, "│  │  skip duplicate generated image %d", i+1)
+			continue
+		}
+		seenBytes[sum] = true
 		results = append(results, upstreamImageResult{Bytes: b, RevisedPrompt: prompt})
 	}
 	traceLogf(ctx, "└─ image generation done images=%d", len(results))
@@ -617,7 +649,7 @@ func (c *UpstreamClient) startImage(ctx context.Context, prompt, model string, c
 	payload := map[string]any{"action": "next", "messages": []any{map[string]any{"id": uuid4(), "author": map[string]any{"role": "user"}, "create_time": float64(time.Now().UnixNano()) / 1e9, "content": content, "metadata": metadata}}, "parent_message_id": uuid4(), "model": imageModelSlug(model), "client_prepare_state": "sent", "timezone_offset_min": -480, "timezone": "Asia/Shanghai", "conversation_mode": map[string]any{"kind": "primary_assistant"}, "enable_message_followups": true, "system_hints": []string{"picture_v2"}, "supports_buffering": true, "supported_encodings": []string{"v1"}, "client_contextual_info": clientContext(), "paragen_cot_summary_display_override": "allow", "force_parallel_switch": "auto"}
 	return c.do(ctx, http.MethodPost, path, c.imageHeaders(path, cr, conduit, "text/event-stream"), payload, true)
 }
-func (c *UpstreamClient) uploadImage(ctx context.Context, data []byte, name string) (map[string]any, error) {
+func (c *UpstreamClient) uploadImage(ctx context.Context, data []byte, name string, timeout time.Duration) (map[string]any, error) {
 	traceLogf(ctx, "│  ├─ upload image begin name=%s bytes=%d", name, len(data))
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
@@ -658,7 +690,7 @@ func (c *UpstreamClient) uploadImage(ctx context.Context, data []byte, name stri
 	putReq.Header.Set("Accept-Language", "en-US,en;q=0.8")
 	traceLogf(ctx, "│  ├─ object storage PUT %s bytes=%d headers: %s", safeURLForLog(uploadURL), len(data), traceHeaderPreview(putReq.Header))
 	putStart := time.Now()
-	put, err := (&stdhttp.Client{Timeout: 120 * time.Second}).Do(putReq)
+	put, err := (&stdhttp.Client{Timeout: timeout}).Do(putReq)
 	if err != nil {
 		traceLogf(ctx, "│  └─ object storage PUT failed duration=%s error=%v", traceHTTPDuration(putStart), err)
 		return nil, err
@@ -680,18 +712,52 @@ func (c *UpstreamClient) uploadImage(ctx context.Context, data []byte, name stri
 	traceLogf(ctx, "│  └─ upload image done file_id=%s", maskedValue(fileID))
 	return map[string]any{"file_id": fileID, "file_name": name, "file_size": len(data), "mime_type": mimeType, "width": cfg.Width, "height": cfg.Height}, nil
 }
-func (c *UpstreamClient) pollImageIDs(ctx context.Context, cid string, timeout time.Duration) ([]string, []string) {
+func (c *UpstreamClient) pollImageIDs(ctx context.Context, cid string, timeout, interval, initialWait time.Duration) ([]string, []string) {
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	if interval <= 0 {
+		interval = 4 * time.Second
+	}
 	deadline := time.Now().Add(timeout)
+	if initialWait > 0 {
+		traceLogf(ctx, "│  │  image poll initial wait %s", initialWait)
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(initialWait):
+		}
+	}
+	backoff := interval
 	for time.Now().Before(deadline) {
 		conv, err := c.getConversation(ctx, cid)
 		if err == nil {
+			backoff = interval
 			f, s := extractToolIDs(conv)
 			if len(f) > 0 || len(s) > 0 {
 				return f, s
 			}
+		} else {
+			traceLogf(ctx, "│  │  image poll conversation failed: %v", err)
+			if isTemporaryUpstreamErrorText(err) && backoff < interval*3 {
+				backoff += interval
+			}
 		}
-		time.Sleep(4 * time.Second)
+		remaining := time.Until(deadline)
+		sleep := backoff
+		if remaining < sleep {
+			sleep = remaining
+		}
+		if sleep <= 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(sleep):
+		}
 	}
+	traceLogf(ctx, "│  └─ image poll timed out conversation=%s timeout=%s", maskedValue(cid), timeout)
 	return nil, nil
 }
 func (c *UpstreamClient) getConversation(ctx context.Context, cid string) (map[string]any, error) {
@@ -1576,7 +1642,7 @@ func (c *UpstreamClient) conversationContent(ctx context.Context, raw any) (map[
 		parts = append(parts, text)
 	}
 	for i, imageBytes := range images {
-		uploaded, err := c.uploadImage(ctx, imageBytes, fmt.Sprintf("chat_image_%d.png", i+1))
+		uploaded, err := c.uploadImage(ctx, imageBytes, fmt.Sprintf("chat_image_%d.png", i+1), 120*time.Second)
 		if err != nil {
 			return nil, nil, err
 		}

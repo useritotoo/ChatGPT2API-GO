@@ -14,22 +14,24 @@ import (
 )
 
 type Server struct {
-	root        string
-	dataDir     string
-	imagesDir   string
-	webDist     string
-	cfg         Config
-	store       *Store
-	mux         *http.ServeMux
-	accMu       sync.Mutex
-	authMu      sync.Mutex
-	taskMu      sync.Mutex
-	galleryMu   sync.Mutex
-	logMu       sync.Mutex
-	callStarts  map[string]time.Time
-	taskCancels map[string]context.CancelFunc
-	accountPool *accountPool
-	logSvc      *logService
+	root             string
+	dataDir          string
+	imagesDir        string
+	webDist          string
+	cfg              Config
+	store            *Store
+	mux              *http.ServeMux
+	accMu            sync.Mutex
+	authMu           sync.Mutex
+	taskMu           sync.Mutex
+	galleryMu        sync.Mutex
+	logMu            sync.Mutex
+	imageCleanupMu   sync.Mutex
+	lastImageCleanup time.Time
+	callStarts       map[string]time.Time
+	taskCancels      map[string]context.CancelFunc
+	accountPool      *accountPool
+	logSvc           *logService
 }
 
 func NewServer(root string) (*Server, error) {
@@ -52,6 +54,12 @@ func NewServer(root string) (*Server, error) {
 	}
 	if cfg.ImagePollTimeoutSecs <= 0 {
 		cfg.ImagePollTimeoutSecs = 120
+	}
+	if cfg.ImagePollIntervalSecs <= 0 {
+		cfg.ImagePollIntervalSecs = 4
+	}
+	if cfg.ImagePollInitialWaitSecs < 0 {
+		cfg.ImagePollInitialWaitSecs = 0
 	}
 	if cfg.ImageAccountConcurrency <= 0 {
 		cfg.ImageAccountConcurrency = 3
@@ -110,6 +118,8 @@ func (s *Server) configMap(includeAuth bool) map[string]any {
 	m["refresh_account_interval_minute"] = s.cfg.RefreshAccountIntervalMinute
 	m["image_retention_days"] = s.cfg.ImageRetentionDays
 	m["image_poll_timeout_secs"] = s.cfg.ImagePollTimeoutSecs
+	m["image_poll_interval_secs"] = s.cfg.ImagePollIntervalSecs
+	m["image_poll_initial_wait_secs"] = s.cfg.ImagePollInitialWaitSecs
 	m["auto_remove_rate_limited_accounts"] = s.cfg.AutoRemoveRateLimitedAccounts
 	m["auto_remove_invalid_accounts"] = s.cfg.AutoRemoveInvalidAccounts
 	m["log_levels"] = s.cfg.LogLevels
