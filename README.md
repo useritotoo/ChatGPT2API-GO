@@ -67,10 +67,23 @@ ChatGPT2API Go 的目标是把 ChatGPT 网页端能力封装成可自托管的 A
 
 ### 工具调用支持
 
-- `/v1/chat/completions` 支持 OpenAI tools 格式。
-- 支持流式工具调用增量输出。
-- 会剥离上游工具 XML 标记，避免把 `<tool_calls>` 等内部标记直接显示给客户端。
-- 支持非流式工具调用解析和 `finish_reason=tool_calls`。
+- `/v1/chat/completions` 支持 OpenAI tools 格式，并返回标准 `tool_calls` / `finish_reason=tool_calls`。
+- `/v1/messages` 支持将工具调用转换为 Anthropic `tool_use` 内容块。
+- `/v1/responses` 支持输出 `function_call` item；流式模式会发送 `response.function_call_arguments.*` 生命周期事件。
+- 推荐上游模型使用 canonical XML 工具块，长文本、代码和路径建议放入 CDATA：
+
+  ```xml
+  <tool_calls>
+    <invoke name="read_file">
+      <parameter name="path"><![CDATA[README.md]]></parameter>
+    </invoke>
+  </tool_calls>
+  ```
+
+- 兼容旧版 JSON `{"tool_calls":[...]}` 和旧 XML 工具标记。
+- 会剥离上游工具 XML / JSON 标记，避免把 `<tool_calls>` 等内部标记直接显示给客户端。
+- 会忽略 Markdown 代码块和 inline code span 中的工具调用示例，减少误触发。
+- 支持 `tool_choice=none`、`required` 和强制函数名；不满足 required / forced 约束时返回协议级错误。
 
 ### 多模态输入
 

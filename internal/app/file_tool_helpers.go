@@ -424,7 +424,8 @@ func openAIToolCallsFromText(text string, tools any) []map[string]any {
 		if name == "" {
 			continue
 		}
-		args, _ := json.Marshal(call["input"])
+		input := normalizeToolInputForSchema(name, mapAny(call["input"]), tools)
+		args, _ := json.Marshal(input)
 		calls = append(calls, map[string]any{
 			"id":   fmt.Sprintf("call_%s_%d", randID(4), i),
 			"type": "function",

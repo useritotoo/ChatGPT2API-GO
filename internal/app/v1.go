@@ -64,7 +64,7 @@ func (s *Server) imageResult(w http.ResponseWriter, r *http.Request, id *Identit
 	for i := 0; i < n; i++ {
 		items, err := s.generateImageWithPool(ctx, prompt, model, size, resolution, refs)
 		if err != nil {
-			s.refundImage(id, n)
+			s.refundImage(id, n-len(data))
 			s.logCallFailure(callID, endpoint, model, action, err, map[string]any{"n": n})
 			writeErr(w, 502, err.Error())
 			return
@@ -72,7 +72,7 @@ func (s *Server) imageResult(w http.ResponseWriter, r *http.Request, id *Identit
 		for _, result := range items {
 			rel, url, err := s.saveImage(r, result.Bytes)
 			if err != nil {
-				s.refundImage(id, n)
+				s.refundImage(id, n-len(data))
 				s.logCallFailure(callID, endpoint, model, action, err, nil)
 				writeErr(w, 500, err.Error())
 				return
@@ -169,10 +169,6 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		s.handleV1ChatImageCompletion(w, r, id, b)
 		return
 	}
-	if !s.consumeChat(id, 1) {
-		writeErr(w, 402, "对话额度不足")
-		return
-	}
 	model := strAny(b["model"], "auto")
 	messages, err := s.chatCompletionMessages(b)
 	if err != nil {
@@ -184,6 +180,10 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 	if err := s.checkContent(requestText); err != nil {
 		s.logCallFailure(callID, "/v1/chat/completions", model, "文本生成", err, nil)
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if !s.consumeChat(id, 1) {
+		writeErr(w, 402, "对话额度不足")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
@@ -233,7 +233,11 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		} else {
 			s.logCallSuccess(callID, "/v1/chat/completions", model, "文本生成", map[string]any{"stream": true})
 		}
+		parsedToolCalls := parseToolCalls(full)
 		toolCalls := openAIToolCallsFromText(full, b["tools"])
+		if err := validateToolChoice(parsedToolCalls, b["tools"], b["tool_choice"]); err != nil {
+			sse(w, map[string]any{"error": map[string]any{"message": err.Error(), "type": "invalid_tool_choice"}})
+		}
 		if len(toolCalls) > 0 {
 			if !sentRole {
 				sse(w, map[string]any{"id": cid, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": nil}, "finish_reason": nil}}})
@@ -252,6 +256,13 @@ func (s *Server) handleV1ChatCompletions(w http.ResponseWriter, r *http.Request)
 		s.refundChat(id, 1)
 		s.logCallFailure(callID, "/v1/chat/completions", model, "文本生成", err, nil)
 		writeErr(w, 502, err.Error())
+		return
+	}
+	parsedToolCalls := parseToolCalls(content)
+	if err := validateToolChoice(parsedToolCalls, b["tools"], b["tool_choice"]); err != nil {
+		s.refundChat(id, 1)
+		s.logCallFailure(callID, "/v1/chat/completions", model, "文本生成", err, nil)
+		writeErr(w, 422, err.Error())
 		return
 	}
 	toolCalls := openAIToolCallsFromText(content, b["tools"])
@@ -297,14 +308,14 @@ func (s *Server) handleV1ChatImageCompletion(w http.ResponseWriter, r *http.Requ
 	for i := 0; i < n; i++ {
 		items, err := s.generateImageWithPool(ctx, prompt, model, size, resolution, refs)
 		if err != nil {
-			s.refundImage(id, n)
+			s.refundImage(id, n-len(data))
 			writeErr(w, 502, err.Error())
 			return
 		}
 		for _, result := range items {
 			rel, url, err := s.saveImage(r, result.Bytes)
 			if err != nil {
-				s.refundImage(id, n)
+				s.refundImage(id, n-len(data))
 				writeErr(w, 500, err.Error())
 				return
 			}
@@ -362,7 +373,7 @@ func (s *Server) handleV1Responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if boolAny(b["stream"], false) {
-		s.streamResponseEvents(w, r, id, messages, model, callID)
+		s.streamResponseEvents(w, r, id, messages, model, b["tools"], b["tool_choice"], callID)
 		return
 	}
 	content, err := s.collectUpstreamText(r, messages, model)
@@ -372,9 +383,24 @@ func (s *Server) handleV1Responses(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 502, err.Error())
 		return
 	}
-	s.logCallSuccess(callID, "/v1/responses", model, "Responses", map[string]any{"output_tokens": approxTokens(content)})
-	out := []map[string]any{{"id": "msg_" + randID(8), "type": "message", "status": "completed", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": content, "annotations": []any{}}}}}
-	inputTokens, outputTokens := approxTokens(requestText), approxTokens(content)
+	parsedToolCalls := parseToolCalls(content)
+	if err := validateToolChoice(parsedToolCalls, b["tools"], b["tool_choice"]); err != nil {
+		s.refundChat(id, 1)
+		s.logCallFailure(callID, "/v1/responses", model, "Responses", err, nil)
+		writeErr(w, 422, err.Error())
+		return
+	}
+	cleanContent := content
+	if len(parsedToolCalls) > 0 || (toolsListNonEmpty(b["tools"]) && containsToolMarkup(content)) {
+		cleanContent = stripToolMarkup(content)
+	}
+	s.logCallSuccess(callID, "/v1/responses", model, "Responses", map[string]any{"output_tokens": approxTokens(cleanContent)})
+	out := []map[string]any{}
+	if strings.TrimSpace(cleanContent) != "" || len(parsedToolCalls) == 0 {
+		out = append(out, responseTextOutputItem(cleanContent, "", "completed"))
+	}
+	out = append(out, responseFunctionCallItems(parsedToolCalls)...)
+	inputTokens, outputTokens := approxTokens(requestText), approxTokens(cleanContent)
 	writeJSON(w, 200, map[string]any{"id": "resp_" + randID(8), "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": out, "parallel_tool_calls": false, "usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens, "total_tokens": inputTokens + outputTokens}})
 }
 func (s *Server) handleV1Messages(w http.ResponseWriter, r *http.Request) {
@@ -411,7 +437,7 @@ func (s *Server) handleV1Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if boolAny(b["stream"], false) {
-		s.streamAnthropicEvents(w, r, id, messages, model, b["tools"], callID)
+		s.streamAnthropicEvents(w, r, id, messages, model, b["tools"], b["tool_choice"], callID)
 		return
 	}
 	content, err := s.collectUpstreamText(r, messages, model)
@@ -421,7 +447,14 @@ func (s *Server) handleV1Messages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 502, err.Error())
 		return
 	}
-	s.logCallSuccess(callID, "/v1/messages", model, "Messages", map[string]any{"output_tokens": approxTokens(content)})
+	parsedToolCalls := parseToolCalls(content)
+	if err := validateToolChoice(parsedToolCalls, b["tools"], b["tool_choice"]); err != nil {
+		s.refundChat(id, 1)
+		s.logCallFailure(callID, "/v1/messages", model, "Messages", err, nil)
+		writeErr(w, 422, err.Error())
+		return
+	}
+	s.logCallSuccess(callID, "/v1/messages", model, "Messages", map[string]any{"output_tokens": approxTokens(stripToolMarkup(content))})
 	blocks, stopReason := anthropicContentBlocks(content, b["tools"])
 	writeJSON(w, 200, map[string]any{"id": "msg_" + randID(8), "type": "message", "role": "assistant", "model": model, "content": blocks, "stop_reason": stopReason, "stop_sequence": nil, "usage": map[string]any{"input_tokens": approxTokens(requestText), "output_tokens": approxTokens(content)}})
 }
@@ -495,7 +528,7 @@ func (s *Server) handleV1ResponseImage(w http.ResponseWriter, r *http.Request, i
 	writeJSON(w, 200, responseCompletedEvent(respID, model, created, out)["response"])
 }
 
-func (s *Server) streamResponseEvents(w http.ResponseWriter, r *http.Request, id *Identity, messages []map[string]any, model, callID string) {
+func (s *Server) streamResponseEvents(w http.ResponseWriter, r *http.Request, id *Identity, messages []map[string]any, model string, tools any, toolChoice any, callID string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 	events, errs := s.streamTextWithRetry(ctx, messages, model, "", "")
@@ -504,16 +537,33 @@ func (s *Server) streamResponseEvents(w http.ResponseWriter, r *http.Request, id
 	itemID := "msg_" + randID(8)
 	created := time.Now().Unix()
 	full := ""
+	streamedVisible := ""
+	textOpened := false
 	sse(w, responseCreatedEvent(respID, model, created))
 	sse(w, responseInProgressEvent(respID, model, created))
-	sse(w, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": responseTextOutputItem("", itemID, "in_progress")})
-	sse(w, map[string]any{"type": "response.content_part.added", "item_id": itemID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 	for ev := range events {
 		if ev.Delta == "" {
 			continue
 		}
 		full += ev.Delta
-		sse(w, map[string]any{"type": "response.output_text.delta", "delta": ev.Delta, "item_id": itemID, "output_index": 0, "content_index": 0})
+		visible := full
+		if toolsListNonEmpty(tools) {
+			visible, _ = streamableToolText(full)
+		}
+		if !strings.HasPrefix(visible, streamedVisible) {
+			streamedVisible = ""
+		}
+		delta := visible[len(streamedVisible):]
+		if delta == "" {
+			continue
+		}
+		if !textOpened {
+			textOpened = true
+			sse(w, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": responseTextOutputItem("", itemID, "in_progress")})
+			sse(w, map[string]any{"type": "response.content_part.added", "item_id": itemID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
+		}
+		streamedVisible = visible
+		sse(w, map[string]any{"type": "response.output_text.delta", "delta": delta, "item_id": itemID, "output_index": 0, "content_index": 0})
 	}
 	if err := <-errs; err != nil {
 		s.refundChat(id, 1)
@@ -524,18 +574,51 @@ func (s *Server) streamResponseEvents(w http.ResponseWriter, r *http.Request, id
 		sseDone(w)
 		return
 	}
-	s.logCallSuccess(callID, "/v1/responses", model, "Responses", map[string]any{"stream": true, "output_tokens": approxTokens(full)})
-	item := responseTextOutputItem(full, itemID, "completed")
-	sse(w, map[string]any{"type": "response.output_text.done", "item_id": itemID, "output_index": 0, "content_index": 0, "text": full})
-	sse(w, map[string]any{"type": "response.content_part.done", "item_id": itemID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": full, "annotations": []any{}}})
-	sse(w, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
-	completed := responseCompletedEvent(respID, model, created, []map[string]any{item})
+	parsedToolCalls := parseToolCalls(full)
+	if err := validateToolChoice(parsedToolCalls, tools, toolChoice); err != nil {
+		s.refundChat(id, 1)
+		s.logCallFailure(callID, "/v1/responses", model, "Responses", err, map[string]any{"stream": true})
+		failed := responseFailedEvent(respID, model, created, err.Error())
+		sse(w, failed)
+		sse(w, map[string]any{"type": "response.done", "response": failed["response"]})
+		sseDone(w)
+		return
+	}
+	cleanContent := full
+	if len(parsedToolCalls) > 0 || (toolsListNonEmpty(tools) && containsToolMarkup(full)) {
+		cleanContent = stripToolMarkup(full)
+	}
+	s.logCallSuccess(callID, "/v1/responses", model, "Responses", map[string]any{"stream": true, "output_tokens": approxTokens(cleanContent)})
+	out := []map[string]any{}
+	outputIndex := 0
+	if textOpened || strings.TrimSpace(cleanContent) != "" || len(parsedToolCalls) == 0 {
+		item := responseTextOutputItem(cleanContent, itemID, "completed")
+		if !textOpened {
+			sse(w, map[string]any{"type": "response.output_item.added", "output_index": outputIndex, "item": responseTextOutputItem("", itemID, "in_progress")})
+			sse(w, map[string]any{"type": "response.content_part.added", "item_id": itemID, "output_index": outputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
+		}
+		sse(w, map[string]any{"type": "response.output_text.done", "item_id": itemID, "output_index": outputIndex, "content_index": 0, "text": cleanContent})
+		sse(w, map[string]any{"type": "response.content_part.done", "item_id": itemID, "output_index": outputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": cleanContent, "annotations": []any{}}})
+		sse(w, map[string]any{"type": "response.output_item.done", "output_index": outputIndex, "item": item})
+		out = append(out, item)
+		outputIndex++
+	}
+	for _, item := range responseFunctionCallItems(parsedToolCalls) {
+		args := strAny(item["arguments"], "{}")
+		sse(w, map[string]any{"type": "response.output_item.added", "output_index": outputIndex, "item": map[string]any{"id": item["id"], "type": "function_call", "call_id": item["call_id"], "name": item["name"], "arguments": "", "status": "in_progress"}})
+		sse(w, map[string]any{"type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": outputIndex, "delta": args})
+		sse(w, map[string]any{"type": "response.function_call_arguments.done", "item_id": item["id"], "output_index": outputIndex, "arguments": args})
+		sse(w, map[string]any{"type": "response.output_item.done", "output_index": outputIndex, "item": item})
+		out = append(out, item)
+		outputIndex++
+	}
+	completed := responseCompletedEvent(respID, model, created, out)
 	sse(w, completed)
 	sse(w, map[string]any{"type": "response.done", "response": completed["response"]})
 	sseDone(w)
 }
 
-func (s *Server) streamAnthropicEvents(w http.ResponseWriter, r *http.Request, id *Identity, messages []map[string]any, model string, tools any, callID string) {
+func (s *Server) streamAnthropicEvents(w http.ResponseWriter, r *http.Request, id *Identity, messages []map[string]any, model string, tools any, toolChoice any, callID string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 	events, errs := s.streamTextWithRetry(ctx, messages, model, "", "")
@@ -584,7 +667,14 @@ func (s *Server) streamAnthropicEvents(w http.ResponseWriter, r *http.Request, i
 		sseEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"type": "upstream_error", "message": err.Error()}})
 		return
 	}
-	s.logCallSuccess(callID, "/v1/messages", model, "Messages", map[string]any{"stream": true, "output_tokens": approxTokens(current)})
+	parsedToolCalls := parseToolCalls(current)
+	if err := validateToolChoice(parsedToolCalls, tools, toolChoice); err != nil {
+		s.refundChat(id, 1)
+		s.logCallFailure(callID, "/v1/messages", model, "Messages", err, map[string]any{"stream": true})
+		sseEvent(w, "error", map[string]any{"type": "error", "error": map[string]any{"type": "invalid_tool_choice", "message": err.Error()}})
+		return
+	}
+	s.logCallSuccess(callID, "/v1/messages", model, "Messages", map[string]any{"stream": true, "output_tokens": approxTokens(stripToolMarkup(current))})
 	blocks, stopReason := anthropicContentBlocks(current, tools)
 	if textOpen {
 		sseEvent(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
@@ -634,7 +724,7 @@ func (s *Server) imageResultStream(w http.ResponseWriter, r *http.Request, id *I
 	for i := 0; i < n; i++ {
 		items, err := s.generateImageWithPool(ctx, prompt, model, size, resolution, refs)
 		if err != nil {
-			s.refundImage(id, n)
+			s.refundImage(id, n-i)
 			s.logSvc.add("call", "上游图片生成失败", map[string]any{"model": model, "error": err.Error()})
 			sse(w, map[string]any{"object": "image.generation.message", "created": created, "model": model, "index": i, "total": n, "message": err.Error()})
 			sseDone(w)
@@ -644,7 +734,7 @@ func (s *Server) imageResultStream(w http.ResponseWriter, r *http.Request, id *I
 		for _, result := range items {
 			rel, url, err := s.saveImage(r, result.Bytes)
 			if err != nil {
-				s.refundImage(id, n)
+				s.refundImage(id, n-i)
 				sse(w, map[string]any{"error": err.Error()})
 				sseDone(w)
 				return
@@ -703,7 +793,7 @@ func buildToolPrompt(tools any) string {
 	if len(blocks) == 0 {
 		return ""
 	}
-	return "Available tools:\n" + strings.Join(blocks, "\n") + "\n\nTool use rules:\n- If the user asks to list/read/search files, inspect project state, run a command, or answer from local code, you MUST call a suitable tool first. Do not say you cannot access files.\n- To call tools, output ONLY JSON and no prose/markdown:\n{\"tool_calls\":[{\"tool_name\":\"TOOL_NAME\",\"parameters\":{\"PARAM\":\"value\"}}]}\n- Use tool_name exactly as listed. Put parameters under parameters using the exact schema names."
+	return "Available tools:\n" + strings.Join(blocks, "\n") + "\n\nTool use rules:\n- If the user asks to list/read/search files, inspect project state, run a command, or answer from local code, you MUST call a suitable tool first. Do not say you cannot access files.\n- To call tools, output ONLY this XML and no prose/markdown:\n<tool_calls><invoke name=\"TOOL_NAME\"><parameter name=\"PARAM\"><![CDATA[value]]></parameter></invoke></tool_calls>\n- Use invoke name exactly as listed. Put each argument in a parameter tag using the exact schema name. Use CDATA for strings, code, paths, JSON, or shell commands.\n- Legacy JSON tool_calls is accepted for compatibility, but XML is preferred."
 }
 
 func jsonString(v any) string {
@@ -728,11 +818,6 @@ func messagesText(messages []map[string]any) string {
 		parts = append(parts, messageTextAny(m["content"]))
 	}
 	return strings.Join(parts, "\n")
-}
-
-func streamableAnthropicText(text string) string {
-	visible, _ := streamableToolText(text)
-	return visible
 }
 
 func streamableToolText(text string) (string, bool) {
@@ -820,7 +905,7 @@ func anthropicContentBlocks(text string, tools any) ([]map[string]any, string) {
 }
 
 func parseToolCalls(text string) []map[string]any {
-	text = stripFencedCodeBlocks(text)
+	text = stripToolCodeContexts(text)
 	out := []map[string]any{}
 	seen := map[string]bool{}
 	appendCall := func(name string, input map[string]any) {
@@ -840,6 +925,9 @@ func parseToolCalls(text string) []map[string]any {
 		out = append(out, map[string]any{"name": name, "input": input})
 	}
 	for _, call := range parseJSONToolCalls(text) {
+		appendCall(strAny(call["name"], ""), mapAny(call["input"]))
+	}
+	for _, call := range parseCanonicalToolCalls(text) {
 		appendCall(strAny(call["name"], ""), mapAny(call["input"]))
 	}
 	for _, block := range toolCallBlocks(text) {
