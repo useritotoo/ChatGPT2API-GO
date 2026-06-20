@@ -1484,8 +1484,8 @@ func (c *UpstreamClient) toConversationMessages(ctx context.Context, messages []
 	}
 	out := []map[string]any{}
 	for _, m := range messages {
-		role := strAny(m["role"], "user")
-		content, metadata, err := c.conversationContent(ctx, m["content"])
+		role, rawContent := upstreamConversationRoleAndContent(m)
+		content, metadata, err := c.conversationContent(ctx, rawContent)
 		if err != nil {
 			return nil, err
 		}
@@ -1496,6 +1496,19 @@ func (c *UpstreamClient) toConversationMessages(ctx context.Context, messages []
 		out = append(out, msg)
 	}
 	return out, nil
+}
+
+func upstreamConversationRoleAndContent(m map[string]any) (string, any) {
+	role := strings.TrimSpace(strAny(m["role"], "user"))
+	switch role {
+	case "system", "assistant", "user":
+		return role, m["content"]
+	case "tool", "function":
+		name := firstNonEmpty(strAny(m["name"], ""), strAny(m["tool_call_id"], ""), strAny(m["tool_use_id"], ""), "tool")
+		return "user", "Tool result from " + name + ":\n" + messageTextAny(m["content"])
+	default:
+		return "user", messageTextAny(m["content"])
+	}
 }
 
 func (c *UpstreamClient) conversationContent(ctx context.Context, raw any) (map[string]any, map[string]any, error) {
