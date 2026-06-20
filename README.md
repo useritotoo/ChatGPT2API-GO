@@ -230,6 +230,39 @@ CHATGPT2API_NETWORK_TRACE=0 ./start.sh --port 3000
 
 ## 快速开始
 
+### 一键安装或更新
+
+无需下载整个仓库，直接运行 GitHub 托管的安装脚本。脚本会从 GitHub Release 下载最新版本并安装到 `./chatgpt2api-go-install`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jwbb903/CHATGPT2API-GO/main/scripts/install_latest.sh | bash
+```
+
+指定安装目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jwbb903/CHATGPT2API-GO/main/scripts/install_latest.sh | bash -s -- --dir /opt/chatgpt2api-go
+```
+
+如果没有可用 Release 包，也可以从最新源码构建安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jwbb903/CHATGPT2API-GO/main/scripts/install_latest.sh | bash -s -- --from-source --web
+```
+
+已下载仓库源码时，也可以直接运行本地脚本：
+
+```bash
+bash scripts/install_latest.sh
+```
+
+脚本会尽量保留已安装目录中的 `config.json` 和 `data/`。安装后按提示运行：
+
+```bash
+cd ./chatgpt2api-go-install
+./start.sh --port 3000
+```
+
 ### 使用发布包运行
 
 ```bash
