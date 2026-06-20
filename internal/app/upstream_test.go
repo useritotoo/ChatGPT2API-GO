@@ -352,3 +352,36 @@ func TestUpstreamConversationStateHidesInternalMarkupFromDelta(t *testing.T) {
 		t.Fatalf("Delta still contains internal markup: %q", ev.Delta)
 	}
 }
+
+func TestNormalizeChatGPTInternalMarkupDropsUnclosedMarker(t *testing.T) {
+	got := normalizeChatGPTInternalMarkup("- River\n- entity[\"broken\"\n- Bloom")
+	want := "- River\n- "
+	if got != want {
+		t.Fatalf("normalizeChatGPTInternalMarkup() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeChatGPTInternalMarkupParsesEntityWithTrailingText(t *testing.T) {
+	got := normalizeChatGPTInternalMarkup("- entity[\"song\", \"Blinding Lights\", \"The Weeknd\"]正文粘连 after")
+	want := "- Blinding Lights - The Weeknd after"
+	if got != want {
+		t.Fatalf("normalizeChatGPTInternalMarkup() = %q, want %q", got, want)
+	}
+}
+
+func TestUpstreamConversationStateDoesNotLoseRawTextAfterUnclosedMarker(t *testing.T) {
+	state := newUpstreamConversationState("", nil)
+	payload1 := `{"message":{"author":{"role":"assistant"},"content":{"parts":["开头 entity[\"song\",\"Night"]}}}`
+	if ev, ok := state.Apply(payload1); !ok || ev.Delta != "开头 " {
+		t.Fatalf("first Delta = %q ok=%v, want 开头 / true", ev.Delta, ok)
+	}
+	payload2 := `{"message":{"author":{"role":"assistant"},"content":{"parts":["开头 entity[\"song\",\"Night Trouble\",\"Klangkarussell\"] 结束"]}}}`
+	ev, ok := state.Apply(payload2)
+	if !ok {
+		t.Fatal("expected second Apply to emit completed entity")
+	}
+	want := "Night Trouble - Klangkarussell 结束"
+	if ev.Delta != want {
+		t.Fatalf("second Delta = %q, want %q", ev.Delta, want)
+	}
+}

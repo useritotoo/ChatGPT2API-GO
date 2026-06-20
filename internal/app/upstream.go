@@ -1008,28 +1008,46 @@ func normalizeChatGPTInternalMarkup(text string) string {
 	if !strings.ContainsRune(text, '') {
 		return text
 	}
-	re := regexp.MustCompile(`([^]*)`)
-	return re.ReplaceAllStringFunc(text, func(mark string) string {
-		inner := strings.TrimSuffix(strings.TrimPrefix(mark, ""), "")
-		kind, payload, ok := strings.Cut(inner, "")
-		if !ok {
-			return ""
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		start := strings.IndexRune(text[i:], '')
+		if start < 0 {
+			b.WriteString(text[i:])
+			break
 		}
-		switch strings.TrimSpace(kind) {
-		case "entity":
-			return readableChatGPTEntity(payload)
-		case "cite":
-			return ""
-		default:
-			return ""
+		start += i
+		b.WriteString(text[i:start])
+		end := strings.IndexRune(text[start:], '')
+		if end < 0 {
+			break
 		}
-	})
+		end += start
+		b.WriteString(readableChatGPTInternalMark(text[start+len("") : end]))
+		i = end + len("")
+	}
+	return b.String()
+}
+
+func readableChatGPTInternalMark(inner string) string {
+	kind, payload, ok := strings.Cut(inner, "")
+	if !ok {
+		return ""
+	}
+	switch strings.TrimSpace(kind) {
+	case "entity":
+		return readableChatGPTEntity(payload)
+	case "cite":
+		return ""
+	default:
+		return ""
+	}
 }
 
 func readableChatGPTEntity(payload string) string {
 	payload = strings.TrimSpace(payload)
+	payload = leadingJSONArray(payload)
 	var parts []string
-	if err := json.Unmarshal([]byte(payload), &parts); err != nil || len(parts) == 0 {
+	if payload == "" || json.Unmarshal([]byte(payload), &parts) != nil || len(parts) == 0 {
 		return ""
 	}
 	if len(parts) > 1 && isChatGPTEntityType(parts[0]) {
@@ -1046,6 +1064,44 @@ func readableChatGPTEntity(payload string) string {
 		return ""
 	}
 	return strings.Join(out, " - ")
+}
+
+func leadingJSONArray(text string) string {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "[") {
+		return ""
+	}
+	inString := false
+	escaped := false
+	depth := 0
+	for i, r := range text {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				continue
+			}
+			if r == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch r {
+		case '"':
+			inString = true
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return text[:i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func isChatGPTEntityType(value string) bool {
@@ -1108,13 +1164,13 @@ func (s *upstreamConversationState) Apply(payload string) (UpstreamTextEvent, bo
 		s.CleanText = ""
 		return s.snapshotMeta(), false
 	}
-	next := normalizeChatGPTInternalMarkup(assistantTextWithHistory(ev, s.Text, s.HistoryText))
+	next := assistantTextWithHistory(ev, s.Text, s.HistoryText)
 	if next == s.Text {
 		meta = s.snapshotMeta()
 		return meta, meta.ConversationID != "" || meta.MessageID != "" || meta.CurrentNode != "" || len(meta.FileIDs) > 0 || len(meta.SedimentIDs) > 0 || meta.Blocked || meta.ToolInvoked != nil || meta.TurnUseCase != ""
 	}
 	s.Text = next
-	clean := next
+	clean := normalizeChatGPTInternalMarkup(next)
 	delta := ""
 	if strings.HasPrefix(clean, s.CleanText) {
 		delta = clean[len(s.CleanText):]
