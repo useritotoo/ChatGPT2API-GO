@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	http "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
@@ -1003,6 +1004,63 @@ func parseSSE(r io.Reader) <-chan string {
 	}()
 	return ch
 }
+func normalizeChatGPTInternalMarkup(text string) string {
+	if !strings.ContainsRune(text, '') {
+		return text
+	}
+	re := regexp.MustCompile(`([^]*)`)
+	return re.ReplaceAllStringFunc(text, func(mark string) string {
+		inner := strings.TrimSuffix(strings.TrimPrefix(mark, ""), "")
+		kind, payload, ok := strings.Cut(inner, "")
+		if !ok {
+			return ""
+		}
+		switch strings.TrimSpace(kind) {
+		case "entity":
+			return readableChatGPTEntity(payload)
+		case "cite":
+			return ""
+		default:
+			return ""
+		}
+	})
+}
+
+func readableChatGPTEntity(payload string) string {
+	payload = strings.TrimSpace(payload)
+	var parts []string
+	if err := json.Unmarshal([]byte(payload), &parts); err != nil || len(parts) == 0 {
+		return ""
+	}
+	if len(parts) > 1 && isChatGPTEntityType(parts[0]) {
+		parts = parts[1:]
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, " - ")
+}
+
+func isChatGPTEntityType(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && r != '_' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func assistantDelta(payload string, current *string) string {
 	state := newUpstreamConversationState("", nil)
 	state.Text = *current
@@ -1050,7 +1108,7 @@ func (s *upstreamConversationState) Apply(payload string) (UpstreamTextEvent, bo
 		s.CleanText = ""
 		return s.snapshotMeta(), false
 	}
-	next := assistantTextWithHistory(ev, s.Text, s.HistoryText)
+	next := normalizeChatGPTInternalMarkup(assistantTextWithHistory(ev, s.Text, s.HistoryText))
 	if next == s.Text {
 		meta = s.snapshotMeta()
 		return meta, meta.ConversationID != "" || meta.MessageID != "" || meta.CurrentNode != "" || len(meta.FileIDs) > 0 || len(meta.SedimentIDs) > 0 || meta.Blocked || meta.ToolInvoked != nil || meta.TurnUseCase != ""
@@ -1202,10 +1260,12 @@ func assistantTextWithHistory(event map[string]any, currentText, historyText str
 }
 
 func eventAssistantText(event map[string]any, historyText string) string {
-	return stripHistoryText(assistantTextFromMap(event), historyText)
+	return stripHistoryText(normalizeChatGPTInternalMarkup(assistantTextFromMap(event)), historyText)
 }
 
 func stripHistoryText(text, historyText string) string {
+	text = normalizeChatGPTInternalMarkup(text)
+	historyText = normalizeChatGPTInternalMarkup(historyText)
 	for historyText != "" && strings.HasPrefix(text, historyText) {
 		text = text[len(historyText):]
 	}
@@ -1267,7 +1327,7 @@ func assistantHistoryMessages(messages []map[string]any) []string {
 	out := []string{}
 	for _, message := range messages {
 		if strings.TrimSpace(strAny(message["role"], "")) == "assistant" {
-			if text := strings.TrimSpace(messageTextAny(message["content"])); text != "" {
+			if text := strings.TrimSpace(normalizeChatGPTInternalMarkup(messageTextAny(message["content"]))); text != "" {
 				out = append(out, text)
 			}
 		}

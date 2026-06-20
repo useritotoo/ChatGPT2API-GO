@@ -319,3 +319,36 @@ func TestChatRequirementsDoesNotFailWhenTurnstileUnsolved(t *testing.T) {
 		t.Fatalf("TurnstileToken = %q, want empty", got.TurnstileToken)
 	}
 }
+
+func TestNormalizeChatGPTInternalMarkup(t *testing.T) {
+	input := "entity[\"song\",\"Night Trouble\",\"Klangkarussell\"] —— 很有城市夜路感。资料来自 citeturn0search4。"
+	got := normalizeChatGPTInternalMarkup(input)
+	want := "Night Trouble - Klangkarussell —— 很有城市夜路感。资料来自 。"
+	if got != want {
+		t.Fatalf("normalizeChatGPTInternalMarkup() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeChatGPTInternalMarkupRemovesUnknownMarkers(t *testing.T) {
+	got := normalizeChatGPTInternalMarkup("before unknownsecret after")
+	want := "before  after"
+	if got != want {
+		t.Fatalf("normalizeChatGPTInternalMarkup() = %q, want %q", got, want)
+	}
+}
+
+func TestUpstreamConversationStateHidesInternalMarkupFromDelta(t *testing.T) {
+	state := newUpstreamConversationState("", nil)
+	payload := `{"message":{"author":{"role":"assistant"},"content":{"parts":["推荐 entity[\"song\",\"Night Trouble\",\"Klangkarussell\"]，资料 citeturn0search4"]}}}`
+	ev, ok := state.Apply(payload)
+	if !ok {
+		t.Fatal("expected state.Apply to emit text")
+	}
+	want := "推荐 Night Trouble - Klangkarussell，资料 "
+	if ev.Delta != want {
+		t.Fatalf("Delta = %q, want %q", ev.Delta, want)
+	}
+	if strings.Contains(ev.Delta, "") || strings.Contains(ev.Delta, "turn0search") {
+		t.Fatalf("Delta still contains internal markup: %q", ev.Delta)
+	}
+}
